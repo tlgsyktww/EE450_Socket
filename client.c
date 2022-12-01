@@ -1,0 +1,267 @@
+/**
+** client.c
+** BASED ON STREAM client.c in Beej's Guide to Network Programming
+*/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <errno.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netdb.h>
+#include <arpa/inet.h>
+#include <sys/wait.h>
+#include <signal.h>
+#include <ctype.h>
+
+#define PORT "25456" // the TCP port of client
+#define IPADDRESS "localhost"
+
+// from Beej
+// get socket address from a sockaddr struct
+void *get_in_addr(struct sockaddr *sa)
+{
+    if (sa->sa_family == AF_INET6)
+    {
+        // IPv6
+        return &(((struct sockaddr_in6 *)sa)->sin6_addr);
+    }
+    // IPv4
+    return &(((struct sockaddr_in *)sa)->sin_addr);
+}
+
+int main(void)
+{
+    char username[20];
+    char password[30];
+    char coz_code[100];
+    char category[15];
+
+    int sockfd;
+    struct addrinfo hints, *servinfo, *p;
+    int rv;
+    char s[INET6_ADDRSTRLEN];
+
+    char sendbuf[100]; // form: "username password" || "one coz_code category" ||"coznum coz_code<1> coz_code<2>"
+    char recvbuf[4000];
+    int numbytes;
+
+    /****************CREATE TCP CONNECTION************************/
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    if ((rv = getaddrinfo(IPADDRESS, PORT, &hints, &servinfo)) != 0)
+    {
+        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
+        return 1;
+    }
+
+    // loop through all the results and connect to the first we can
+    for (p = servinfo; p != NULL; p = p->ai_next)
+    {
+        if ((sockfd = socket(p->ai_family, p->ai_socktype,
+                             p->ai_protocol)) == -1)
+        {
+            // perror("client: socket");
+            continue;
+        }
+
+        if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1)
+        {
+            close(sockfd);
+            // perror("client: connect");
+            continue;
+        }
+
+        break;
+    }
+
+    if (p == NULL)
+    {
+        // fprintf(stderr, "client: failed to connect\n");
+        return 2;
+    }
+
+    inet_ntop(p->ai_family, get_in_addr((struct sockaddr *)p->ai_addr), s, sizeof s);
+    printf("The client is up and running.\n");
+
+    freeaddrinfo(servinfo); // all done with this structure
+
+    // Get client Port
+    struct sockaddr_in c;
+    socklen_t cLen = sizeof(c);
+    getsockname(sockfd, (struct sockaddr *)&c, &cLen);
+    // printf("Client Port: %d\n", ntohs(c.sin_port));
+
+    /****************DATA TRANSFER: LOGIN************************/
+    int login_num = 0; // login attempts
+    for (login_num = 0; login_num < 3; login_num++)
+    {
+        /****************SEND DATA************************/
+        printf("Please enter the username: ");
+        scanf("%s", username);
+        printf("Please enter the password: ");
+        scanf("%s", password);
+        // in sendbuf
+        sprintf(sendbuf, "%s %s", username, password);
+
+        if ((numbytes = send(sockfd, sendbuf, strlen(sendbuf), 0)) == -1)
+        {
+            perror("send");
+            exit(1);
+        }
+        fflush(stdout);
+        printf("%s sent an authentication request to the main server.\n", username);
+
+        /****************RECEIVE DATA************************/
+        if ((numbytes = recv(sockfd, recvbuf, 200, 0)) == -1)
+        {
+            perror("recv");
+            exit(1);
+        }
+        recvbuf[numbytes] = '\0';
+        // in recvbuf
+
+        /****************LOGIN AUTHENTICATION************************/
+        // printf("login authentication result: %s \n", recvbuf);
+        if (strcmp(recvbuf, "FAIL_NO_USER") == 0)
+        {
+            printf("%s received the result of authentication using TCP over port %d. Authentication failed: Username Does not exist\n", username, ntohs(c.sin_port));
+            printf("\nAttempts remaining:%d\n", 2 - login_num);
+        }
+        else if (strcmp(recvbuf, "FAIL_PASS_NO_MATCH") == 0)
+        {
+            printf("%s received the result of authentication using TCP over port %d. Authentication failed: Password does not match\n", username, ntohs(c.sin_port));
+            printf("\nAttempts remaining:%d\n", 2 - login_num);
+        }
+        else
+            printf("%s received the result of authentication using TCP over port %d. Authentication is successful\n", username, ntohs(c.sin_port));
+
+        if (strcmp(recvbuf, "PASS") == 0)
+            break;
+    }
+
+    if (login_num == 3)
+    {
+        printf("Authentication Failed for 3 attempts. Client will shut down.\n");
+        close(sockfd);
+    }
+    else
+    {
+        /****************COURSE INQUIRY************************/
+        while (1)
+        {
+            printf("Please enter the course code to query: ");
+            // Use fgets to enter information with spaces
+            setbuf(stdin, NULL); // Clear the input buffer
+            fgets(coz_code, 100, stdin);
+            // Remove the carriage return generated by fgets
+            if (coz_code[strlen(coz_code) - 1] == '\n')
+            {
+                coz_code[strlen(coz_code) - 1] = '\0';
+            }
+            // printf("input course code: %s", coz_code);
+
+            /****************MULTI-COURSE QUERY************************/
+            if (strlen(coz_code) > 5)
+            {
+                int multi_coz = 1; // Number of multi-course inquiries
+                for (int i = 0; i < strlen(coz_code); i++)
+                {
+                    if (coz_code[i] == ' ')
+                        multi_coz++;
+                }
+                // printf("Number of multi-course inquiries: %d\n", multi_coz);
+
+                /****************SEND DATA************************/
+                // in sendbuf
+                sprintf(sendbuf, "%d %s", multi_coz, coz_code);
+                if ((numbytes = send(sockfd, sendbuf, strlen(sendbuf), 0)) == -1)
+                {
+                    perror("send");
+                    exit(1);
+                }
+                fflush(stdout);
+                printf("%s sent a request with multiple CourseCode to the main server.\n", username);
+                /****************RECEIVE DATA************************/
+                if (multi_coz != 1)
+                {
+                    printf("The client received the response from the Main server using TCP over port %d.\n", ntohs(c.sin_port));
+                    printf("CourseCode: Credits, Professor, Days, Course Name\n");
+                }
+                for (int j = 0; j < multi_coz; j++)
+                {
+                    if ((numbytes = recv(sockfd, recvbuf, 4000, 0)) == -1)
+                    {
+                        perror("recv");
+                        exit(1);
+                    }
+                    recvbuf[numbytes] = '\0';
+                    // in recvbuf
+                    if (strcmp(recvbuf, "FAIL_NO_COURSE") == 0)
+                    {
+                        printf("Didn't find the course.\n");
+                    }
+                    else
+                        printf("%s\n", recvbuf);
+                }
+                printf("\n\n-----Start a new request-----\n");
+
+                continue;
+            }
+
+            /****************SINGLE COURSE QUERY************************/
+            printf("Please enter the category (Credit / Professor / Days / CourseName): ");
+            scanf("%s", category);
+            if (strcmp(category, "Credit") == 0 || strcmp(category, "credit") == 0)
+                strcpy(category, "Credit");
+            else if (strcmp(category, "Professor") == 0 || strcmp(category, "professor") == 0)
+                strcpy(category, "Professor");
+            else if (strcmp(category, "Days") == 0 || strcmp(category, "days") == 0)
+                strcpy(category, "Days");
+            else if (strcmp(category, "CourseName") == 0 || strcmp(category, "coursename") == 0)
+                strcpy(category, "CourseName");
+            else
+            {
+                printf("Wrong input, please re-enter.\n");
+                printf("\n\n-----Start a new request-----\n");
+                continue;
+            }
+
+            /****************SEND DATA************************/
+            sprintf(sendbuf, "1 %s %s", coz_code, category);
+            if ((numbytes = send(sockfd, sendbuf, strlen(sendbuf), 0)) == -1)
+            {
+                perror("send");
+                exit(1);
+            }
+            fflush(stdout);
+            printf("%s sent a request to the main server.\n", username);
+
+            /****************RECEIVE DATA************************/
+            if ((numbytes = recv(sockfd, recvbuf, 200, 0)) == -1)
+            {
+                perror("recv");
+                exit(1);
+            }
+            recvbuf[numbytes] = '\0';
+            // in recvbuf
+
+            printf("The client received the response from the Main server using TCP over port %d.\n", ntohs(c.sin_port));
+            if (strcmp(recvbuf, "FAIL_NO_COURSE") == 0)
+            {
+                printf("Didn't find the course: %s.\n", coz_code);
+            }
+            else
+                printf("The %s of %s is %s.\n", category, coz_code, recvbuf);
+
+            printf("\n\n-----Start a new request-----\n");
+        }
+    }
+
+    return 0;
+}
